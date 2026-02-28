@@ -13,5 +13,5 @@ export const ICE_CONFIG = {
 
 export const SIGNAL_SERVER_URL =
   process.env.NEXT_PUBLIC_SIGNAL_SERVER_URL ||
-  'http://3.80.201.5:5000' ||
+  'http://34.198.25.152:5000' ||
   'http://localhost:5000';

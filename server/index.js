@@ -23,8 +23,8 @@ const allowedOrigins = [
   'http://localhost:3000',
   'https://localhost:3000',
   'https://192.168.1.33:3000',
-  'http://3.80.201.5:3000',
-  'https://3.80.201.5:3000',
+  'http://34.198.25.152:3000',
+  'https://34.198.25.152:3000',
 ];
 
 app.use(

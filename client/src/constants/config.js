@@ -4,7 +4,7 @@ export const ICE_CONFIG = {
       urls: 'stun:stun.l.google.com:19302',
     },
     {
-      urls: 'turn:54.242.142.48:3478',
+      urls: 'turn:3.80.201.5:3478',
       username: 'user',
       credential: 'password',
     },
@@ -13,5 +13,5 @@ export const ICE_CONFIG = {
 
 export const SIGNAL_SERVER_URL =
   process.env.NEXT_PUBLIC_SIGNAL_SERVER_URL ||
-  'http://54.242.142.48:5000' ||
+  'http://3.80.201.5:5000' ||
   'http://localhost:5000';

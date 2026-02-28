@@ -25,6 +25,7 @@ const allowedOrigins = [
   'https://192.168.1.33:3000',
   'http://34.198.25.152:3000',
   'https://34.198.25.152:3000',
+  'https://nextjs-videocall-frontend.vercel.app/',
 ];
 
 app.use(

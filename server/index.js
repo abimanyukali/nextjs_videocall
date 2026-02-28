@@ -22,7 +22,9 @@ const allowedOrigins = [
   'https://686dffq3-3000.inc1.devtunnels.ms',
   'http://localhost:3000',
   'https://localhost:3000',
-  'https://192.168.1.33:3000'
+  'https://192.168.1.33:3000',
+  'http://54.242.142.48:3000',
+  'https://54.242.142.48:3000',
 ];
 
 app.use(
@@ -37,7 +39,7 @@ app.use(
       }
     },
     credentials: true,
-  })
+  }),
 );
 
 const io = new Server(httpServer, {

@@ -19,6 +19,8 @@ export const useWebRTC = () => {
   const roomIdRef = useRef(null);
   const pairingInfoRef = useRef(null); // Store pairing info if media isn't ready
 
+  const peerIdRef = useRef(null);
+
   const cleanupPeer = useCallback(() => {
     if (peerRef.current) {
       peerRef.current.destroy();
@@ -38,21 +40,128 @@ export const useWebRTC = () => {
         trickle: true,
         config: ICE_CONFIG,
         stream: stream,
+        sdpTransform: (sdp) => {
+          return sdp.replace(/b=AS:\d+/g, 'b=AS:5000');
+        },
       });
 
+      // 🔥 Prefer VP9 codec (better compression)
+      setTimeout(() => {
+        const transceiver = peer._pc
+          .getTransceivers()
+          .find((t) => t.sender?.track?.kind === 'video');
+
+        if (transceiver) {
+          const codecs = RTCRtpSender.getCapabilities('video').codecs;
+
+          const preferred = codecs.filter(
+            (c) => c.mimeType === 'video/VP9' || c.mimeType === 'video/H264',
+          );
+
+          if (preferred.length) {
+            transceiver.setCodecPreferences(preferred);
+            console.log('Preferred VP9/H264 set 🎥');
+          }
+        }
+      }, 500);
+
+      // 🔥 NETWORK MONITOR FUNCTION
+      const monitorNetwork = () => {
+        let lastPacketsSent = 0;
+        let lastPacketsLost = 0;
+
+        const interval = setInterval(async () => {
+          if (!peer._pc) return;
+
+          const stats = await peer._pc.getStats();
+
+          stats.forEach((report) => {
+            if (report.type === 'outbound-rtp' && report.kind === 'video') {
+              const packetsSent = report.packetsSent || 0;
+              const packetsLost = report.packetsLost || 0;
+
+              const sentDiff = packetsSent - lastPacketsSent;
+              const lostDiff = packetsLost - lastPacketsLost;
+
+              lastPacketsSent = packetsSent;
+              lastPacketsLost = packetsLost;
+
+              const lossRate = sentDiff > 0 ? (lostDiff / sentDiff) * 100 : 0;
+
+              const sender = peer._pc
+                .getSenders()
+                .find((s) => s.track?.kind === 'video');
+
+              if (!sender) return;
+
+              const params = sender.getParameters();
+              if (!params.encodings) params.encodings = [{}];
+
+              if (lossRate > 10) {
+                params.encodings[0].maxBitrate = 1500000; // Medium quality
+              } else if (lossRate > 5) {
+                params.encodings[0].maxBitrate = 3000000; // Good quality
+              } else {
+                params.encodings[0].maxBitrate = 5000000; // Full HD
+              }
+
+              sender.setParameters(params);
+            }
+          });
+        }, 5000);
+
+        peer.on('close', () => clearInterval(interval));
+      };
+      // Signaling
       peer.on('signal', (data) => {
         if (socketRef.current) {
           socketRef.current.emit('signal', { roomId, signal: data });
         }
       });
-
+      // receive remote stream
       peer.on('stream', (remoteStream) => {
         setRemoteStream(remoteStream);
+      });
+
+      peer._pc.oniceconnectionstatechange = () => {
+        const state = peer._pc.iceConnectionState;
+        console.log('ICE State:', state);
+
+        if (state === 'failed' || state === 'disconnected') {
+          console.log('Restarting ICE...');
+          peer._pc.restartIce();
+        }
+      };
+
+      // 🔥 INCREASE BITRATE FOR HD
+      peer.on('connect', async () => {
+        const sender = peer._pc
+          .getSenders()
+          .find((s) => s.track?.kind === 'video');
+
+        if (sender) {
+          const params = sender.getParameters();
+          if (!params.encodings) params.encodings = [{}];
+
+          params.encodings[0].maxBitrate = 5000000; // 5 Mbps
+          params.encodings[0].maxFramerate = 30;
+          params.encodings[0].scaleResolutionDownBy = 1;
+
+          await sender.setParameters(params);
+          console.log('Bitrate upgraded 🚀');
+        }
+        monitorNetwork();
       });
 
       peer.on('error', (err) => {
         console.error('Peer error:', err);
         setError('P2P Connection Error');
+        // 🔥 Auto reconnect logic
+        if (roomIdRef.current && streamRef.current && peerIdRef.current) {
+          console.log('Reconnecting peer...');
+          const isInitiator = socketRef.current.id < peerIdRef.current;
+          createPeer(isInitiator, roomIdRef.current, streamRef.current);
+        }
       });
 
       peer.on('close', () => {
@@ -82,8 +191,18 @@ export const useWebRTC = () => {
         streamRef.current.getTracks().forEach((track) => track.stop());
       }
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1280 }, height: { ideal: 720 } },
-        audio: true,
+        video: {
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          frameRate: { ideal: 30, max: 30 },
+        },
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          sampleRate: 44100,
+          autoGainControl: true,
+          channelCount: 2,
+        },
       });
       setLocalStream(stream);
       streamRef.current = stream;
@@ -160,12 +279,18 @@ export const useWebRTC = () => {
     const socket = connectSocket();
     socketRef.current = socket;
 
+    // 🔥 KEEPALIVE PING (prevents silent disconnect)
+    const interval = setInterval(() => {
+      socket.emit('ping-test');
+    }, 15000);
+
     socket.on('waiting', () => {
       setStatus('waiting');
     });
 
     socket.on('paired', ({ roomId, peerId }) => {
       roomIdRef.current = roomId;
+      peerIdRef.current = peerId; // ✅ ADD THIS
       setStatus('paired');
 
       const currentStream = streamRef.current;
@@ -199,6 +324,7 @@ export const useWebRTC = () => {
     });
 
     return () => {
+      clearInterval(interval);
       socket.off('waiting');
       socket.off('paired');
       socket.off('signal');

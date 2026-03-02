@@ -1,5 +1,5 @@
 import express from 'express';
-import { createServer } from 'http';
+import http from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
 import dotenv from 'dotenv';
@@ -8,7 +8,7 @@ import rateLimit from 'express-rate-limit';
 dotenv.config();
 
 const app = express();
-const httpServer = createServer(app);
+const httpServer = http.createServer(app);
 
 // Security: Rate limiting
 const limiter = rateLimit({
@@ -20,12 +20,13 @@ const limiter = rateLimit({
 app.use(limiter);
 const allowedOrigins = [
   'https://686dffq3-3000.inc1.devtunnels.ms',
+  'https://abimanyuresearchlab.online/',
   'http://localhost:3000',
   'https://localhost:3000',
   'https://192.168.1.33:3000',
   'http://34.198.25.152:3000',
   'https://34.198.25.152:3000',
-  'https://nextjs-videocall-frontend.vercel.app/',
+  'https://nextjs-videocall-frontend.vercel.app',
 ];
 
 app.use(
@@ -49,6 +50,8 @@ const io = new Server(httpServer, {
     methods: ['GET', 'POST'],
     credentials: true,
   },
+  pingInterval: 20000,
+  pingTimeout: 60000,
 });
 
 /**
@@ -159,6 +162,11 @@ io.on('connection', (socket) => {
     } catch (err) {
       console.error('Skip Error:', err);
     }
+  });
+
+  // 🔥 Respond to keepalive ping
+  socket.on('ping-test', () => {
+    socket.emit('pong-test');
   });
 
   socket.on('disconnect', (reason) => {

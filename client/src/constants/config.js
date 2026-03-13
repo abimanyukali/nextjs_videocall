@@ -16,4 +16,4 @@ export const ICE_CONFIG = {
 };
 
 export const SIGNAL_SERVER_URL =
-  process.env.NEXT_PUBLIC_SIGNAL_SERVER_URL || '/';
+  process.env.NEXT_PUBLIC_SIGNAL_SERVER_URL || ' /';

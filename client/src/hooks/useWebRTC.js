@@ -5,21 +5,39 @@ import Peer from 'simple-peer';
 import { connectSocket, getSocket } from '../lib/socket';
 import { ICE_CONFIG } from '../constants/config';
 
-export const useWebRTC = () => {
+const MAX_CALL_SECONDS = 60; // 1 minute per call
+
+export const useWebRTC = (token, isPremiumUser = false) => {
   const [localStream, setLocalStream] = useState(null);
   const [remoteStream, setRemoteStream] = useState(null);
   const [status, setStatus] = useState('idle'); // idle, waiting, connecting, paired
   const [error, setError] = useState(null);
   const [isAudioMuted, setIsAudioMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(false);
+  const [callTimeLeft, setCallTimeLeft] = useState(null); // countdown in seconds
+  const [isPremium, setIsPremium] = useState(isPremiumUser);
 
   const socketRef = useRef(null);
   const peerRef = useRef(null);
   const streamRef = useRef(null);
   const roomIdRef = useRef(null);
-  const pairingInfoRef = useRef(null); // Store pairing info if media isn't ready
-
+  const pairingInfoRef = useRef(null);
   const peerIdRef = useRef(null);
+  const callTimerRef = useRef(null);
+  const countdownRef = useRef(null);
+
+  // ---- Clear call timer + countdown ----
+  const clearCallTimer = useCallback(() => {
+    if (callTimerRef.current) {
+      clearTimeout(callTimerRef.current);
+      callTimerRef.current = null;
+    }
+    if (countdownRef.current) {
+      clearInterval(countdownRef.current);
+      countdownRef.current = null;
+    }
+    setCallTimeLeft(null);
+  }, []);
 
   const cleanupPeer = useCallback(() => {
     if (peerRef.current) {
@@ -27,7 +45,12 @@ export const useWebRTC = () => {
       peerRef.current = null;
     }
     setRemoteStream(null);
+    clearCallTimer();
+  }, [clearCallTimer]);
+
+  const resetRoomContext = useCallback(() => {
     roomIdRef.current = null;
+    peerIdRef.current = null;
     pairingInfoRef.current = null;
   }, []);
 
@@ -45,7 +68,6 @@ export const useWebRTC = () => {
         },
       });
 
-      // 🔥 Prefer VP9 codec (better compression)
       setTimeout(() => {
         const transceiver = peer._pc
           .getTransceivers()
@@ -53,102 +75,74 @@ export const useWebRTC = () => {
 
         if (transceiver) {
           const codecs = RTCRtpSender.getCapabilities('video').codecs;
-
           const preferred = codecs.filter(
             (c) => c.mimeType === 'video/VP9' || c.mimeType === 'video/H264',
           );
-
           if (preferred.length) {
             transceiver.setCodecPreferences(preferred);
-            console.log('Preferred VP9/H264 set 🎥');
           }
         }
       }, 500);
 
-      // 🔥 NETWORK MONITOR FUNCTION
       const monitorNetwork = () => {
         let lastPacketsSent = 0;
         let lastPacketsLost = 0;
-
         const interval = setInterval(async () => {
           if (!peer._pc) return;
-
           const stats = await peer._pc.getStats();
-
           stats.forEach((report) => {
             if (report.type === 'outbound-rtp' && report.kind === 'video') {
               const packetsSent = report.packetsSent || 0;
               const packetsLost = report.packetsLost || 0;
-
               const sentDiff = packetsSent - lastPacketsSent;
               const lostDiff = packetsLost - lastPacketsLost;
-
               lastPacketsSent = packetsSent;
               lastPacketsLost = packetsLost;
-
               const lossRate = sentDiff > 0 ? (lostDiff / sentDiff) * 100 : 0;
-
-              const sender = peer._pc
-                .getSenders()
-                .find((s) => s.track?.kind === 'video');
-
+              const sender = peer._pc.getSenders().find((s) => s.track?.kind === 'video');
               if (!sender) return;
-
               const params = sender.getParameters();
               if (!params.encodings) params.encodings = [{}];
-
               if (lossRate > 10) {
-                params.encodings[0].maxBitrate = 1500000; // Medium quality
+                params.encodings[0].maxBitrate = 1500000;
               } else if (lossRate > 5) {
-                params.encodings[0].maxBitrate = 3000000; // Good quality
+                params.encodings[0].maxBitrate = 3000000;
               } else {
-                params.encodings[0].maxBitrate = 5000000; // Full HD
+                params.encodings[0].maxBitrate = 5000000;
               }
-
               sender.setParameters(params);
             }
           });
         }, 5000);
-
         peer.on('close', () => clearInterval(interval));
       };
-      // Signaling
+
       peer.on('signal', (data) => {
         if (socketRef.current) {
           socketRef.current.emit('signal', { roomId, signal: data });
         }
       });
-      // receive remote stream
+
       peer.on('stream', (remoteStream) => {
         setRemoteStream(remoteStream);
       });
 
       peer._pc.oniceconnectionstatechange = () => {
         const state = peer._pc.iceConnectionState;
-        console.log('ICE State:', state);
-
         if (state === 'failed' || state === 'disconnected') {
-          console.log('Restarting ICE...');
           peer._pc.restartIce();
         }
       };
 
-      // 🔥 INCREASE BITRATE FOR HD
       peer.on('connect', async () => {
-        const sender = peer._pc
-          .getSenders()
-          .find((s) => s.track?.kind === 'video');
-
+        const sender = peer._pc.getSenders().find((s) => s.track?.kind === 'video');
         if (sender) {
           const params = sender.getParameters();
           if (!params.encodings) params.encodings = [{}];
-
-          params.encodings[0].maxBitrate = 5000000; // 5 Mbps
+          params.encodings[0].maxBitrate = 5000000;
           params.encodings[0].maxFramerate = 30;
           params.encodings[0].scaleResolutionDownBy = 1;
-
           await sender.setParameters(params);
-          console.log('Bitrate upgraded 🚀');
         }
         monitorNetwork();
       });
@@ -156,9 +150,7 @@ export const useWebRTC = () => {
       peer.on('error', (err) => {
         console.error('Peer error:', err);
         setError('P2P Connection Error');
-        // 🔥 Auto reconnect logic
         if (roomIdRef.current && streamRef.current && peerIdRef.current) {
-          console.log('Reconnecting peer...');
           const isInitiator = socketRef.current.id < peerIdRef.current;
           createPeer(isInitiator, roomIdRef.current, streamRef.current);
         }
@@ -177,7 +169,6 @@ export const useWebRTC = () => {
   const initMedia = useCallback(async () => {
     setError(null);
 
-    // Safety check for mobile (non-secure context)
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       const errorMsg = window.isSecureContext
         ? 'Camera/Microphone access is not supported by your browser.'
@@ -207,10 +198,9 @@ export const useWebRTC = () => {
       setLocalStream(stream);
       streamRef.current = stream;
 
-      // If we were already paired but waiting for media, create peer now
       if (pairingInfoRef.current) {
         const { roomId, peerId } = pairingInfoRef.current;
-        const isInitiator = getSocket().id < peerId;
+        const isInitiator = getSocket(token).id < peerId;
         createPeer(isInitiator, roomId, stream);
         pairingInfoRef.current = null;
       }
@@ -227,7 +217,46 @@ export const useWebRTC = () => {
       setError(msg);
       return null;
     }
-  }, [createPeer]);
+  }, [createPeer, token]);
+
+  // ---- Switch Camera (Premium only) ----
+  const switchCamera = useCallback(async () => {
+    if (!isPremium) return;
+    try {
+      const currentTrack = streamRef.current?.getVideoTracks()[0];
+      const currentFacingMode = currentTrack?.getSettings()?.facingMode;
+      const newFacingMode = currentFacingMode === 'user' ? 'environment' : 'user';
+
+      const newStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: newFacingMode },
+        audio: false,
+      });
+
+      const newVideoTrack = newStream.getVideoTracks()[0];
+
+      // Replace track in local stream
+      if (streamRef.current) {
+        const oldTrack = streamRef.current.getVideoTracks()[0];
+        if (oldTrack) {
+          streamRef.current.removeTrack(oldTrack);
+          oldTrack.stop();
+        }
+        streamRef.current.addTrack(newVideoTrack);
+      }
+
+      // Replace in peer connection
+      if (peerRef.current && peerRef.current._pc) {
+        const sender = peerRef.current._pc.getSenders().find((s) => s.track?.kind === 'video');
+        if (sender) await sender.replaceTrack(newVideoTrack);
+      }
+
+      setLocalStream(streamRef.current ? new MediaStream(streamRef.current.getTracks()) : null);
+      setIsVideoOff(false);
+    } catch (err) {
+      console.error('Switch camera error:', err);
+      setError('Failed to switch camera');
+    }
+  }, [isPremium]);
 
   const join = useCallback(() => {
     if (socketRef.current) {
@@ -239,20 +268,41 @@ export const useWebRTC = () => {
   const skip = useCallback(() => {
     if (socketRef.current) {
       cleanupPeer();
+      resetRoomContext();
       socketRef.current.emit('skip');
     }
-  }, [cleanupPeer]);
+  }, [cleanupPeer, resetRoomContext]);
 
   const disconnect = useCallback(() => {
     if (socketRef.current) {
       cleanupPeer();
-      socketRef.current.disconnect();
-      socketRef.current = null;
+      resetRoomContext();
+      socketRef.current.emit('disconnect-call');
       setStatus('idle');
     }
-  }, [cleanupPeer]);
+  }, [cleanupPeer, resetRoomContext]);
 
+  const report = useCallback(() => {
+    if (socketRef.current && roomIdRef.current) {
+      socketRef.current.emit('report', { roomId: roomIdRef.current });
+      cleanupPeer();
+      resetRoomContext();
+      setStatus('waiting');
+    }
+  }, [cleanupPeer, resetRoomContext]);
+
+  const block = useCallback(() => {
+    if (socketRef.current && roomIdRef.current) {
+      socketRef.current.emit('block', { roomId: roomIdRef.current });
+      cleanupPeer();
+      resetRoomContext();
+      setStatus('waiting');
+    }
+  }, [cleanupPeer, resetRoomContext]);
+
+  // Only premium users can toggle audio
   const toggleAudio = useCallback(() => {
+    if (!isPremium) return;
     if (streamRef.current) {
       const audioTrack = streamRef.current.getAudioTracks()[0];
       if (audioTrack) {
@@ -260,9 +310,11 @@ export const useWebRTC = () => {
         setIsAudioMuted(!audioTrack.enabled);
       }
     }
-  }, []);
+  }, [isPremium]);
 
+  // Only premium users can toggle video
   const toggleVideo = useCallback(() => {
+    if (!isPremium) return;
     if (streamRef.current) {
       const videoTrack = streamRef.current.getVideoTracks()[0];
       if (videoTrack) {
@@ -270,41 +322,54 @@ export const useWebRTC = () => {
         setIsVideoOff(!videoTrack.enabled);
       }
     }
-  }, []);
+  }, [isPremium]);
 
   // Initial media and socket setup
   useEffect(() => {
+    if (!token) return;
+
     initMedia();
 
-    const socket = connectSocket();
+    const socket = connectSocket(token);
     socketRef.current = socket;
 
-    // 🔥 KEEPALIVE PING (prevents silent disconnect)
     const interval = setInterval(() => {
-      socket.emit('ping-test');
+      if (socket.connected) socket.emit('ping-test');
     }, 15000);
 
     socket.on('waiting', () => {
       setStatus('waiting');
     });
 
-    socket.on('paired', ({ roomId, peerId }) => {
+    socket.on('paired', ({ roomId, peerId, isPremium: userIsPremium }) => {
       roomIdRef.current = roomId;
-      peerIdRef.current = peerId; // ✅ ADD THIS
+      peerIdRef.current = peerId;
       setStatus('paired');
+      setIsPremium(!!userIsPremium);
+
+      // Start client-side countdown display
+      clearCallTimer();
+      setCallTimeLeft(MAX_CALL_SECONDS);
+      countdownRef.current = setInterval(() => {
+        setCallTimeLeft((prev) => {
+          if (prev <= 1) {
+            clearInterval(countdownRef.current);
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
 
       const currentStream = streamRef.current;
       if (currentStream) {
         const isInitiator = socket.id < peerId;
         createPeer(isInitiator, roomId, currentStream);
       } else {
-        // Media not ready yet, store info and wait for initMedia to finish
         pairingInfoRef.current = { roomId, peerId };
       }
     });
 
     socket.on('signal', ({ roomId, signal }) => {
-      // Critical check to avoid processing old signals from closed rooms
       if (roomIdRef.current !== roomId) {
         console.warn(`Ignored signal for old/mismatched room: ${roomId}`);
         return;
@@ -316,7 +381,17 @@ export const useWebRTC = () => {
 
     socket.on('peer-disconnected', () => {
       cleanupPeer();
+      resetRoomContext();
       setStatus('waiting');
+    });
+
+    // Server timed out the call (1 minute limit)
+    socket.on('call-time-up', ({ message }) => {
+      console.log('Call time up:', message);
+      cleanupPeer();
+      resetRoomContext();
+      setStatus('idle');
+      setError(message);
     });
 
     socket.on('error', (msg) => {
@@ -325,17 +400,20 @@ export const useWebRTC = () => {
 
     return () => {
       clearInterval(interval);
+      clearCallTimer();
       socket.off('waiting');
       socket.off('paired');
       socket.off('signal');
       socket.off('peer-disconnected');
+      socket.off('call-time-up');
       socket.off('error');
       cleanupPeer();
+      resetRoomContext();
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((track) => track.stop());
       }
     };
-  }, [initMedia, createPeer, cleanupPeer]);
+  }, [initMedia, createPeer, cleanupPeer, resetRoomContext, token, clearCallTimer]);
 
   return {
     localStream,
@@ -344,11 +422,16 @@ export const useWebRTC = () => {
     error,
     isAudioMuted,
     isVideoOff,
+    callTimeLeft,
+    isPremium,
     join,
     skip,
     disconnect,
+    report,
+    block,
     toggleAudio,
     toggleVideo,
+    switchCamera,
     retryMedia: initMedia,
   };
 };

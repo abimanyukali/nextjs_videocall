@@ -3,7 +3,7 @@ import { SIGNAL_SERVER_URL } from '../constants/config';
 
 let socket;
 
-export const getSocket = () => {
+export const getSocket = (token) => {
   if (!socket) {
     socket = io(SIGNAL_SERVER_URL, {
       transports: ['websocket'],
@@ -11,13 +11,18 @@ export const getSocket = () => {
       autoConnect: false,
       reconnectionAttempts: 5,
       timeout: 10000,
+      auth: {
+        token: token
+      }
     });
+  } else if (token) {
+    socket.auth = { token };
   }
   return socket;
 };
 
-export const connectSocket = () => {
-  const s = getSocket();
+export const connectSocket = (token) => {
+  const s = getSocket(token);
   if (!s.connected) {
     s.connect();
   }
